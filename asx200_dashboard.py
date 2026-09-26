@@ -379,6 +379,9 @@ def beeswarm(values: np.ndarray, px_per_unit: float, dot_px: float, max_off_px: 
 # 4. Charts
 # --------------------------------------------------------------------------------------
 
+TREEMAP_STATES: dict = {}
+
+
 def chart_treemap(df: pd.DataFrame) -> go.Figure:
     d = df.dropna(subset=["market_cap"]).copy()
     d = d[d["market_cap"] > 0]
@@ -388,10 +391,11 @@ def chart_treemap(df: pd.DataFrame) -> go.Figure:
         g = d[d["sector"] == s].dropna(subset=[col])
         return float(np.average(g[col], weights=g["market_cap"])) if len(g) else np.nan
 
-    metrics = {
-        "52-week position": ("range_pos", 0, 100, 50, lambda v: fmt(v, 0, "%")),
-        "1-year return": ("ret_1y", -50, 50, 0, lambda v: fmt(v, 0, "%")),
-        "Earnings yield": ("earnings_yield", -8, 12, 0, lambda v: fmt(v, 1, "%")),
+    signed = lambda v: "n/a" if pd.isna(v) else f"{v:+.0f}%"
+    metrics = {  # key: (column, cmin, cmax, cmid, label formatter)
+        "range_pos": ("range_pos", 0, 100, 50, lambda v: fmt(v, 0, "%")),
+        "ret_1y": ("ret_1y", -50, 50, 0, signed),
+        "earnings_yield": ("earnings_yield", -8, 12, 0, lambda v: fmt(v, 1, "%")),
     }
     ids = ["ASX 200"] + [f"s:{s}" for s in sectors.index] + list(d["ticker"])
     labels = ["ASX 200"] + list(sectors.index) + list(d["ticker"])
@@ -426,16 +430,13 @@ def chart_treemap(df: pd.DataFrame) -> go.Figure:
         pathbar=dict(visible=True, thickness=22),
         insidetextfont=dict(family=FONT, color=INK),
     ))
-    buttons = []
-    for label, (col, lo, hi, mid, f) in metrics.items():
+    # Colour/label states for each factor; the page's own factor buttons switch between them
+    TREEMAP_STATES.clear()
+    for key, (col, lo, hi, mid, f) in metrics.items():
         c, t = colors_text(col, f, mid)
-        buttons.append(dict(label=label, method="restyle",
-                            args=[{"marker.colors": [c], "text": [t], "marker.cmin": lo,
-                                   "marker.cmax": hi, "marker.cmid": mid}]))
-    base_layout(fig, 720, margin=dict(l=0, r=0, t=46, b=0))
-    fig.update_layout(updatemenus=[dict(type="buttons", direction="right", x=0, y=1.07, xanchor="left",
-                                        buttons=buttons, showactive=True, bgcolor="white",
-                                        bordercolor=GRID, font=dict(color=INK2, size=12), pad=dict(r=6))])
+        TREEMAP_STATES[key] = {"colors": [None if pd.isna(v) else float(v) for v in c], "text": t,
+                               "cmin": lo, "cmax": hi, "cmid": mid}
+    base_layout(fig, 720, margin=dict(l=0, r=0, t=0, b=0))
     return fig
 
 
@@ -628,7 +629,68 @@ td{padding:6px 10px;border-bottom:1px solid #f0efeb;text-align:right;white-space
 tr:hover td{background:#f7f6f3}td.nm{max-width:220px;overflow:hidden;text-overflow:ellipsis;color:var(--ink2)}
 .rb{position:relative;width:120px;height:6px;border-radius:3px;background:linear-gradient(90deg,#f2b8b5,#ecebe7 50%,#b7d3f6);display:inline-block;vertical-align:middle}
 .rb i{position:absolute;top:-3px;width:4px;height:12px;border-radius:2px;background:var(--ink);transform:translateX(-2px)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;padding:3px;background:#fff;gap:2px;flex-wrap:wrap}
+.seg button{font:inherit;font-size:13px;border:0;background:none;color:var(--ink2);padding:6px 12px;border-radius:6px;cursor:pointer}
+.seg button:hover{color:var(--ink)}.seg button[aria-selected=true]{background:#eaf2fc;color:#184f95;font-weight:600}
+.seg.sm button{font-size:12px;padding:4px 9px}
+.fdesc{margin:10px 0 12px;color:var(--ink);font-size:13.5px;max-width:880px}
+.mapwrap{display:flex;gap:16px;align-items:stretch}.map{flex:1;min-width:0}
+.rank{width:330px;flex:none;display:flex;flex-direction:column;border-left:1px solid var(--line);padding-left:16px;height:720px}
+@media(max-width:980px){.mapwrap{flex-direction:column}.rank{width:auto;border-left:0;padding-left:0;height:520px}}
+.rhead{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.rhead span{font-weight:600;font-size:13px}
+.rlist{overflow:auto;flex:1;padding-right:4px}
+.rk{display:grid;grid-template-columns:30px 46px 1fr 58px;column-gap:6px;align-items:center;padding:5px 2px 6px;border-bottom:1px solid #f0efeb;font-size:12.5px;font-variant-numeric:tabular-nums}
+.rk .n{color:var(--muted);text-align:right}.rk .nm{color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rk .v{text-align:right;font-weight:600}.rk .bt{grid-column:2/5;height:5px;position:relative;background:#f3f2ee;border-radius:3px;margin-top:4px}
+.rk .bt i{position:absolute;top:0;bottom:0;border-radius:3px}.rk .bt b{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--muted)}
+.rnote{color:var(--muted);font-size:12px;padding-top:6px}
 .neg{color:#b3261e}.pos{color:#1c5cab}.foot{color:var(--muted);font-size:12px;margin-top:18px}
+"""
+
+FACTOR_JS = """
+const TM = __TM__, STOPS = __DIV__;
+const FACTORS = {
+ range_pos:{label:'52-week position', title:'52-week position',
+   desc:"Where today's price sits between the stock's lowest (0%) and highest (100%) price of the past 52 weeks.",
+   asc:'Nearest 52-wk low', desc2:'Nearest 52-wk high', f:v=>v.toFixed(0)+'%'},
+ ret_1y:{label:'1-year return', title:'1-year price return',
+   desc:'How much the share price has risen or fallen over the past 12 months (price only, excluding dividends).',
+   asc:'Worst first', desc2:'Best first', f:v=>(v>0?'+':'')+v.toFixed(1)+'%'},
+ earnings_yield:{label:'Earnings yield', title:'Earnings yield',
+   desc:'Annual profit per share as a percentage of the share price (the inverse of P/E): higher means cheaper for each dollar of earnings, negative means loss-making.',
+   asc:'Lowest first', desc2:'Highest first', f:v=>v.toFixed(1)+'%'}};
+let factor='range_pos', dir='asc';
+function hex(h){return [1,3,5].map(i=>parseInt(h.slice(i,i+2),16))}
+function colorAt(t){t=Math.max(0,Math.min(1,t));for(let i=1;i<STOPS.length;i++){const[a,ca]=STOPS[i-1],[b,cb]=STOPS[i];
+  if(t<=b){const k=(t-a)/(b-a),x=hex(ca),y=hex(cb);return `rgb(${x.map((v,j)=>Math.round(v+(y[j]-v)*k)).join(',')})`}}return STOPS.at(-1)[1]}
+function norm(v,s){return v<s.cmid?0.5*(v-s.cmin)/(s.cmid-s.cmin):0.5+0.5*(v-s.cmid)/(s.cmax-s.cmid)}
+const segF=document.getElementById('factors');
+segF.innerHTML=Object.entries(FACTORS).map(([k,F])=>`<button role="tab" data-f="${k}">${F.label}</button>`).join('');
+segF.addEventListener('click',e=>{const b=e.target.closest('button');if(b){factor=b.dataset.f;update(true)}});
+document.getElementById('rdir').addEventListener('click',e=>{const b=e.target.closest('button');if(b){dir=b.dataset.d;update(false)}});
+function update(restyle){
+  const F=FACTORS[factor],S=TM[factor];
+  segF.querySelectorAll('button').forEach(b=>b.setAttribute('aria-selected',b.dataset.f===factor));
+  document.querySelectorAll('#rdir button').forEach(b=>{b.textContent=b.dataset.d==='asc'?F.asc:F.desc2;b.setAttribute('aria-selected',b.dataset.d===dir)});
+  document.getElementById('fdesc').innerHTML=`<b>${F.title}:</b> ${F.desc}`;
+  document.getElementById('rtitle').textContent='Ranked by '+F.label.toLowerCase();
+  const el=document.getElementById('fig-treemap');
+  if(restyle&&el&&window.Plotly&&S)Plotly.restyle(el,{'marker.colors':[S.colors],text:[S.text],'marker.cmin':S.cmin,'marker.cmax':S.cmax,'marker.cmid':S.cmid},[0]);
+  const rows=DATA.filter(r=>isNum(r[factor])).sort((a,b)=>(a[factor]-b[factor])*(dir==='asc'?1:-1));
+  const lo=S?S.cmin:0,hi=S?S.cmax:100,mid=S?S.cmid:50,pos=v=>(Math.max(lo,Math.min(hi,v))-lo)/(hi-lo)*100,m=pos(mid);
+  document.getElementById('rlist').innerHTML=rows.map((r,i)=>{const v=r[factor],p=pos(v),c=colorAt(norm(Math.max(lo,Math.min(hi,v)),S||{cmin:0,cmax:100,cmid:50}));
+    const l=Math.min(p,m),w=Math.max(Math.abs(p-m),1.2);
+    return `<div class="rk" title="${r.name} · ${r.sector}"><span class="n">${i+1}</span><b>${r.ticker}</b><span class="nm">${r.name}</span><span class="v">${F.f(v)}</span>`+
+      `<span class="bt"><i style="left:${factor==='range_pos'?0:l}%;width:${factor==='range_pos'?Math.max(p,1.2):w}%;background:${c}"></i>${factor==='range_pos'?'':`<b style="left:${m}%"></b>`}</span></div>`}).join('');
+  const miss=DATA.length-rows.length;
+  document.getElementById('rnote').textContent=rows.length+' stocks'+(miss?` · ${miss} without data not shown`:'')+(factor==='range_pos'?'':' · grey tick = zero');
+  document.getElementById('rlist').scrollTop=0;
+}
+update(true);
+// the map is drawn before the ranking panel exists, so re-fit it to its column
+const tmEl=document.getElementById('fig-treemap');
+if(tmEl&&window.Plotly){Plotly.Plots.resize(tmEl);window.addEventListener('load',()=>Plotly.Plots.resize(tmEl))}
 """
 
 TABLE_JS = """
@@ -676,7 +738,7 @@ def build_html(df: pd.DataFrame, path: str, source_note: str, cdn: bool = False)
     div = {}
     for k, fn in builders.items():  # one bad chart (e.g. too little data) shouldn't sink the page
         try:
-            div[k] = fn(df).to_html(full_html=False, include_plotlyjs=False, config=cfg)
+            div[k] = fn(df).to_html(full_html=False, include_plotlyjs=False, config=cfg, div_id=f"fig-{k}")
         except Exception as e:
             print(f"  warning: chart '{k}' skipped ({e.__class__.__name__}: {e})")
             div[k] = '<p class="d">Not enough data to draw this chart today.</p>'
@@ -696,7 +758,8 @@ def build_html(df: pd.DataFrame, path: str, source_note: str, cdn: bool = False)
         (f"{(df['ret_1y'] > 0).sum()} / {df['ret_1y'].notna().sum()}", "up over the past year"),
     ]
     cols = ["ticker", "name", "sector", "industry", "price", "low_52w", "high_52w", "range_pos",
-            "pct_from_high", "ret_1y", "market_cap", "pe_trailing", "pe_forward", "eps_trailing", "div_yield"]
+            "pct_from_high", "ret_1y", "earnings_yield", "market_cap", "pe_trailing", "pe_forward", "eps_trailing",
+            "div_yield"]
     records = json.loads(df[cols].replace({np.nan: None}).to_json(orient="records"))
 
     def card(title, desc, key):
@@ -708,9 +771,15 @@ def build_html(df: pd.DataFrame, path: str, source_note: str, cdn: bool = False)
 <h1>ASX 200 market dashboard</h1>
 <p class="sub">{source_note} · Hover any mark for full details · Camera icon on each chart saves a PNG</p>
 <div class="kpis">{''.join(f'<div class="kpi"><div class="v">{v}</div><div class="l">{l}</div></div>' for v, l in kpis)}</div>
-{card("Market map", "Every company as a tile sized by market cap and grouped by sector. Switch the colour between "
-      "52-week position, 1-year return and earnings yield. Click a sector to zoom in; click the bar above to zoom out.",
-      "treemap")}
+<div class="card"><h2>Market map</h2>
+<p class="d">Every company as a tile sized by market cap and grouped by sector. Pick a factor to colour the map and
+rank every stock by it. Click a sector to zoom in; click the bar above the map to zoom out.</p>
+<div class="seg" id="factors" role="tablist"></div>
+<p class="fdesc" id="fdesc"></p>
+<div class="mapwrap"><div class="map">{div["treemap"]}</div>
+<aside class="rank"><div class="rhead"><span id="rtitle"></span>
+<div class="seg sm" id="rdir"><button data-d="asc"></button><button data-d="desc"></button></div></div>
+<div class="rlist" id="rlist"></div><div class="rnote" id="rnote"></div></aside></div></div>
 {card("Where every stock sits in its 52-week range", "Each dot is one company, placed between its 52-week low (0%) "
       "and high (100%). Sectors are sorted by their median (black tick): strongest at the top, weakest at the bottom.",
       "range")}
@@ -730,7 +799,7 @@ def build_html(df: pd.DataFrame, path: str, source_note: str, cdn: bool = False)
 <div class="tbl"><table id="t"><thead></thead><tbody></tbody></table></div></div>
 <p class="foot">Data: Yahoo Finance via yfinance. Figures can be delayed or incomplete; some dual-listed companies report
 EPS in USD, so compare their P/E with care. Not financial advice.</p>
-</div><script>{TABLE_JS.replace("__DATA__", json.dumps(records))}</script></body></html>"""
+</div><script>{TABLE_JS.replace("__DATA__", json.dumps(records))}\n{FACTOR_JS.replace("__TM__", json.dumps(TREEMAP_STATES)).replace("__DIV__", json.dumps(DIVERGING))}</script></body></html>"""
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
 
