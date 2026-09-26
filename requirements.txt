@@ -1,0 +1,7 @@
+yfinance>=0.2.54
+pandas>=2.0
+numpy
+plotly>=5.20
+lxml
+openpyxl
+certifi
