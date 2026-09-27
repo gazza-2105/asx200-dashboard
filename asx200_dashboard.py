@@ -169,7 +169,7 @@ def fetch_history(tickers: list[str], batch: int = 50) -> dict[str, dict]:
 
 
 INFO_FIELDS = {
-    "name": ("shortName", "longName"),
+    "name": ("longName", "shortName"),
     "sector": ("sector",),
     "industry": ("industry",),
     "market_cap": ("marketCap",),
@@ -478,6 +478,39 @@ def chart_range_swarm(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def loss_mask(df: pd.DataFrame) -> pd.Series:
+    """Companies with no positive P/E because they lost money over the last 12 months."""
+    return ~(df["pe_trailing"] > 0) & ((df["eps_trailing"] < 0) | (df["earnings_yield"] < 0))
+
+
+def loss_makers_html(df: pd.DataFrame) -> str:
+    """Expandable list of the companies left off the P/E chart, grouped by sector."""
+    from html import escape
+    loss = df[loss_mask(df)].copy()
+    nodata = df[~(df["pe_trailing"] > 0) & ~loss_mask(df)]
+    if loss.empty and nodata.empty:
+        return ""
+    loss["_cap"] = loss["market_cap"].fillna(0)
+    order = loss.groupby("sector")["_cap"].sum().sort_values(ascending=False).index
+    groups = []
+    for sec in order:
+        g = loss[loss["sector"] == sec].sort_values("_cap", ascending=False)
+        items = "".join(
+            f'<li title="{escape(str(r.industry))}"><b>{escape(r.ticker)}</b><span class="nm">{escape(str(r.name))}</span>'
+            f'<span class="v">EPS {fmt(r.eps_trailing, 2)} · {fmt_cap(r.market_cap)} · '
+            f'1-yr <span class="{"neg" if r.ret_1y < 0 else "pos"}">{fmt(r.ret_1y, 0, "%")}</span></span></li>'
+            for r in g.itertuples())
+        groups.append(f'<div class="lmg"><h4>{escape(sec)} <span>({len(g)})</span></h4><ul>{items}</ul></div>')
+    note = ""
+    if len(nodata):
+        tick = ", ".join(escape(t) for t in nodata.sort_values("market_cap", ascending=False)["ticker"])
+        note = (f'<p class="rnote">{len(nodata)} more have no earnings figure from Yahoo, so they are also left off: '
+                f'{tick}.</p>')
+    return (f'<details class="lm"><summary>Show the {len(loss)} loss-making companies not plotted</summary>'
+            f'<p class="rnote">Negative earnings per share over the last 12 months, grouped by sector and sorted by '
+            f'market cap. Hover a name for its industry.</p><div class="lmgrid">{"".join(groups)}</div>{note}</details>')
+
+
 def chart_pe_swarm(df: pd.DataFrame) -> go.Figure:
     d = df[(df["pe_trailing"] > 0)].copy()
     d["pe_plot"] = d["pe_trailing"].clip(2, 150)
@@ -489,7 +522,7 @@ def chart_pe_swarm(df: pd.DataFrame) -> go.Figure:
         m = d["sector"] == s
         off = beeswarm(np.log10(d.loc[m, "pe_plot"].to_numpy()), plot_w / (hi - lo), dot + 1, row_px * 0.46)
         d.loc[m, "y"] = i + off / row_px
-    neg = df[~(df["pe_trailing"] > 0)].groupby("sector").size()
+    neg = df[loss_mask(df)].groupby("sector").size()
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=d["pe_plot"], y=d["y"], mode="markers", customdata=customdata(d),
                              hovertemplate=HOVER,
@@ -645,6 +678,16 @@ tr:hover td{background:#f7f6f3}td.nm{max-width:220px;overflow:hidden;text-overfl
 .rk .v{text-align:right;font-weight:600}.rk .bt{grid-column:2/5;height:5px;position:relative;background:#f3f2ee;border-radius:3px;margin-top:4px}
 .rk .bt i{position:absolute;top:0;bottom:0;border-radius:3px}.rk .bt b{position:absolute;top:-2px;bottom:-2px;width:1px;background:var(--muted)}
 .rnote{color:var(--muted);font-size:12px;padding-top:6px}
+.lm{margin:4px 0 12px;border-top:1px solid var(--line);padding-top:10px}
+.lm summary{cursor:pointer;font-weight:600;font-size:13.5px;color:#184f95;list-style:none;display:inline-flex;align-items:center;gap:6px}
+.lm summary::-webkit-details-marker{display:none}.lm summary::before{content:'▸';transition:transform .15s}
+.lm[open] summary::before{transform:rotate(90deg)}
+.lmgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px 22px;margin-top:6px}
+.lmg h4{margin:6px 0 4px;font-size:13px}.lmg h4 span{color:var(--muted);font-weight:400}
+.lmg ul{list-style:none;margin:0;padding:0}
+.lmg li{display:grid;grid-template-columns:44px 1fr auto;gap:8px;align-items:baseline;padding:4px 0;border-bottom:1px solid #f0efeb;font-size:12.5px;font-variant-numeric:tabular-nums}
+.lmg li .nm{color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.lmg li .v{color:var(--ink2);white-space:nowrap}
+@media(max-width:520px){.lmgrid{grid-template-columns:1fr}.lmg li{grid-template-columns:44px 1fr}.lmg li .v{grid-column:2}}
 .neg{color:#b3261e}.pos{color:#1c5cab}.foot{color:var(--muted);font-size:12px;margin-top:18px}
 """
 
@@ -762,8 +805,8 @@ def build_html(df: pd.DataFrame, path: str, source_note: str, cdn: bool = False)
             "div_yield"]
     records = json.loads(df[cols].replace({np.nan: None}).to_json(orient="records"))
 
-    def card(title, desc, key):
-        return f'<div class="card"><h2>{title}</h2><p class="d">{desc}</p>{div[key]}</div>'
+    def card(title, desc, key, extra=""):
+        return f'<div class="card"><h2>{title}</h2><p class="d">{desc}</p>{div[key]}{extra}</div>'
 
     html = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>ASX 200 Dashboard</title>
@@ -784,7 +827,8 @@ rank every stock by it. Click a sector to zoom in; click the bar above the map t
       "and high (100%). Sectors are sorted by their median (black tick): strongest at the top, weakest at the bottom.",
       "range")}
 {card("Valuation spread by sector", "Trailing P/E for every profitable company on a log scale; black ticks mark each "
-      "sector's median. Loss-making companies have no meaningful P/E and are counted in the row label.", "pe")}
+      "sector's median. Loss-making companies have no meaningful P/E: they're counted in each row label and listed "
+      "below.", "pe", loss_makers_html(df))}
 <div class="grid2">
 {card("Value vs momentum", "Earnings yield (the inverse of P/E, so loss-makers still show) against how far each stock "
       "trades below its 52-week high. Bubble size = market cap; dotted lines are index medians.", "vm")}
